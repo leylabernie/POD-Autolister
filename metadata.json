@@ -1,0 +1,5 @@
+{
+  "name": "POD Automator",
+  "description": "Intelligent Print-on-Demand uploader application that parses product details to automatically select Printify blueprints.",
+  "requestFramePermissions": []
+}
