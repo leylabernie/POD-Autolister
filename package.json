@@ -20,7 +20,9 @@
     "adm-zip": "^0.5.16",
     "dotenv": "^17.2.3",
     "cors": "^2.8.5",
-    "axios": "^1.13.2"
+    "axios": "^1.13.2",
+    "jszip": "^3.10.1",
+    "@google/genai": "^1.30.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import UploadForm from './components/UploadForm';
 import StatusLog from './components/StatusLog';
-import { UploadFormData, LogEntry, ServerResponse, PRINTIFY_BLUEPRINTS, ProgressEvent } from './types';
+import { UploadFormData, LogEntry, ServerResponse, ProgressEvent } from './types';
 import { uploadListing } from './services/api';
-import { Layers } from 'lucide-react';
+import { Layers, Sparkles } from 'lucide-react';
 
 const App: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
@@ -41,18 +41,12 @@ const App: React.FC = () => {
               percent: event.percent,
               message: event.message
           }));
-
-          // Log major milestones
-          if (event.type === 'server_progress' && event.percent % 10 === 0) {
-              // Only log occasional updates to avoid flooding
-              // addLog(event.message, 'info'); 
-          }
       });
 
       if (response.success) {
         addLog('Blueprint identification successful', 'success');
-        addLog(`Mapped to Blueprint ID: ${response.data?.blueprintId}`, 'info');
-        addLog(`Etsy Mockup upload count: ${response.data?.mockupsUploaded}`, 'info');
+        addLog(`Matched: ${response.data?.blueprintTitle} (${response.data?.blueprintBrand})`, 'success');
+        addLog(`Mockup upload count: ${response.data?.mockupsUploaded}`, 'info');
         addLog('Process finished successfully.', 'success');
         setResult(response);
       } else {
@@ -83,12 +77,15 @@ const App: React.FC = () => {
             </div>
             <div>
               <h1 className="text-xl font-bold text-slate-800">POD Automator</h1>
-              <p className="text-xs text-slate-500">Intelligent Blueprint Matching</p>
+              <p className="text-xs text-slate-500 flex items-center gap-1">
+                <Sparkles className="w-3 h-3 text-yellow-500" />
+                Gemini Powered Intelligence
+              </p>
             </div>
           </div>
           <div className="text-right hidden sm:block">
-            <p className="text-xs text-slate-400">Supported Blueprints</p>
-            <p className="text-sm font-medium text-slate-700">{PRINTIFY_BLUEPRINTS.length} Configured</p>
+            <p className="text-xs text-slate-400">Blueprint Source</p>
+            <p className="text-sm font-medium text-slate-700">Live Printify Catalog</p>
           </div>
         </div>
       </header>
@@ -99,12 +96,15 @@ const App: React.FC = () => {
           <UploadForm onSubmit={handleUpload} isProcessing={isProcessing} />
           
           <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-100">
-             <h4 className="text-sm font-semibold text-indigo-800 mb-2">How it works</h4>
+             <h4 className="text-sm font-semibold text-indigo-800 mb-2 flex items-center gap-2">
+                <Sparkles className="w-4 h-4" />
+                Gemini Intelligence
+             </h4>
              <ul className="text-sm text-indigo-700 space-y-1 list-disc pl-4">
-               <li>Upload a ZIP containing <code className="bg-white px-1 rounded">listing_details.txt</code></li>
-               <li>System parses <strong>Product_Type</strong> header</li>
-               <li>Automatically selects correct Printify Blueprint</li>
-               <li>Creates products on Printify & Etsy draft</li>
+               <li>Upload a ZIP with any messy text file.</li>
+               <li><strong>Gemini 2.5</strong> cleans your Title and Tags.</li>
+               <li>Auto-detects product type (e.g. "Bella Canvas 3001").</li>
+               <li>Matches against the <strong>Live Printify Catalog</strong>.</li>
              </ul>
           </div>
         </div>

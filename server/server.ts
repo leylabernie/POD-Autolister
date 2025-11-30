@@ -1,3 +1,4 @@
+
 /**
  * NOTE: This is a Node.js server file. 
  * To run this:
@@ -24,39 +25,83 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+// Ensure PORT is a number to satisfy app.listen overload
+const PORT = Number(process.env.PORT || 3001);
 
-// ID Configuration
-const PRINTIFY_SHOP_ID = process.env.PRINTIFY_SHOP_ID;
-const ETSY_SHOP_ID = '62135289';
-const ETSY_SHIPPING_PROFILE_ID = '17616184507254';
+// ID Configuration - Allow override via env but default to provided
+const DEFAULT_PRINTIFY_SHOP_ID = '24702235';
 
-// Blueprint Configuration
-const PRINTIFY_BLUEPRINTS = [
-    { category: 'T-SHIRT', brand: 'Bella+Canvas 3001', id: 6 },
-    { category: 'T-SHIRT', brand: 'Next Level 3600', id: 3 },
-    { category: 'SWEATSHIRT', brand: 'Gildan 18000', id: 5 },
-    { category: 'HOODIE', brand: 'Gildan 18500', id: 384 },
-    { category: 'HOODIE', brand: 'Champion S700', id: 9 },
-    { category: 'HOODIE', brand: 'Lane Seven 14001', id: 1098 },
-    { category: 'HOODIE', brand: 'Independent Trading Co. SS4500', id: 462 },
-];
+// Cache for Blueprints
+let catalogCache: any[] = [];
+let lastCatalogFetch = 0;
+const CACHE_DURATION = 1000 * 60 * 60; // 1 hour
 
 // --- Helper Functions ---
 
-const getBlueprintId = (productType: string): number => {
-    const normalizedType = productType.trim().toUpperCase();
+const fetchCatalog = async (apiKey: string) => {
+    const now = Date.now();
+    if (catalogCache.length > 0 && (now - lastCatalogFetch < CACHE_DURATION)) {
+        return catalogCache;
+    }
+
+    console.log("[Catalog] Fetching live blueprints from Printify...");
+    try {
+        // Fetch blueprints (this endpoint returns a list of all available blueprints)
+        const response = await axios.get('https://api.printify.com/v1/catalog/blueprints.json', {
+            headers: { 'Authorization': `Bearer ${apiKey}` }
+        });
+        
+        catalogCache = response.data;
+        lastCatalogFetch = now;
+        console.log(`[Catalog] Cached ${catalogCache.length} blueprints.`);
+        return catalogCache;
+    } catch (error: any) {
+        console.error("[Catalog] Failed to fetch catalog:", error.message);
+        throw new Error("Failed to fetch Printify catalog. Check API Key.");
+    }
+};
+
+const matchBlueprint = (searchTerm: string, catalog: any[]) => {
+    if (!searchTerm) return null;
     
-    // Find the first matching blueprint category
-    const match = PRINTIFY_BLUEPRINTS.find(bp => bp.category === normalizedType);
+    const term = searchTerm.toLowerCase();
+    const searchParts = term.split(/[\s+]+/).filter(Boolean);
     
-    if (match) {
-        return match.id;
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const bp of catalog) {
+        let score = 0;
+        const brand = bp.brand.toLowerCase();
+        const title = bp.title.toLowerCase();
+        const model = (bp.model || '').toLowerCase();
+
+        // Scoring Logic - Heavy weight on exact model match (e.g. "3001")
+        if (model === term) score += 50; 
+        else if (term.includes(model)) score += 20;
+        
+        if (term.includes(brand)) score += 10;
+        if (term.includes(title)) score += 5;
+        
+        // Check individual keywords
+        for (const part of searchParts) {
+            if (brand.includes(part) || title.includes(part) || model.includes(part)) {
+                score += 2;
+            }
+        }
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestMatch = bp;
+        }
+    }
+
+    // Threshold for a "good" match
+    if (bestScore >= 10) {
+        return bestMatch;
     }
     
-    // Default fallback
-    console.warn(`[Blueprint Logic] No direct match for '${productType}'. Defaulting to ID 6.`);
-    return 6;
+    return null;
 };
 
 const parseListingDetails = (text: string) => {
@@ -72,126 +117,183 @@ const parseListingDetails = (text: string) => {
         }
     });
 
-    const requiredFields = ['Product_Type', 'Title', 'Description', 'Tags'];
-    const missing = requiredFields.filter(field => !details[field]);
-
-    if (missing.length > 0) {
-        throw new Error(`Missing required fields in listing_details.txt: ${missing.join(', ')}`);
-    }
-
     return {
-        productType: details['Product_Type'],
+        productType: details['Product_Type'] || details['Product Type'],
         title: details['Title'],
         description: details['Description'],
-        tags: details['Tags']
+        tags: details['Tags'] ? details['Tags'].split(',').map(t => t.trim()) : []
     };
 };
 
 // --- Real Logic Functions ---
 
 const processPrintifyUpload = async (
-    blueprintId: number, 
+    blueprint: any, 
     productDetails: any, 
     apiKey: string,
-    zipEntries: AdmZip.IZipEntry[],
+    storeId: string,
+    mainImageEntry: AdmZip.IZipEntry,
+    mockupEntries: AdmZip.IZipEntry[],
     sendProgress: (p: number, m: string) => void
 ) => {
-    sendProgress(50, `[Printify] Connecting to API...`);
+    sendProgress(50, `[Printify] Connecting to API (Store ${storeId})...`);
 
-    // 1. Find and Upload Image
-    const imageEntry = zipEntries.find(e => e.entryName === 'original.png');
-    if (!imageEntry) throw new Error("original.png not found during Printify processing");
-
-    const imageBase64 = imageEntry.getData().toString('base64');
+    // 1. Upload Main Image
+    const imageBase64 = mainImageEntry.getData().toString('base64');
     
-    sendProgress(55, `[Printify] Uploading artwork file...`);
+    sendProgress(52, `[Printify] Uploading main artwork...`);
     
-    let imageId;
+    let mainImageId;
     try {
         const uploadResponse = await axios.post(
             'https://api.printify.com/v1/uploads/images.json',
             {
-                file_name: "original.png",
+                file_name: mainImageEntry.entryName,
                 contents: imageBase64
             },
             {
                 headers: { 'Authorization': `Bearer ${apiKey}` }
             }
         );
-        imageId = uploadResponse.data.id;
-        console.log(`[Printify] Image Uploaded. ID: ${imageId}`);
+        mainImageId = uploadResponse.data.id;
     } catch (err: any) {
-        throw new Error(`Printify Image Upload Failed: ${err.response?.data?.message || err.message}`);
+        throw new Error(`Printify Main Image Upload Failed: ${err.response?.data?.message || err.message}`);
     }
 
-    // 2. Fetch Valid Variants for this Blueprint
-    // We cannot assume variant IDs are constant across different blueprints.
-    sendProgress(65, `[Printify] Fetching valid variants for Blueprint ${blueprintId}...`);
-    
-    // Using Print Provider 29 (SwiftPOD) as a default, or 25 (Monster Digital). 
-    // We'll try to list variants for provider 29 first.
-    const printProviderId = 29; 
+    // 2. Upload Mockups
+    const mockupIds: string[] = [];
+    if (mockupEntries.length > 0) {
+        sendProgress(55, `[Printify] Uploading ${mockupEntries.length} mockups...`);
+        
+        for (let i = 0; i < mockupEntries.length; i++) {
+            const entry = mockupEntries[i];
+            const mb64 = entry.getData().toString('base64');
+            try {
+                const mResp = await axios.post(
+                    'https://api.printify.com/v1/uploads/images.json',
+                    {
+                        file_name: entry.entryName,
+                        contents: mb64
+                    },
+                    { headers: { 'Authorization': `Bearer ${apiKey}` } }
+                );
+                mockupIds.push(mResp.data.id);
+            } catch (e: any) {
+                console.warn(`[Printify] Failed to upload mockup ${entry.entryName}`);
+            }
+        }
+    }
+
+    // 3. Intelligent Provider & Variant Selection
+    sendProgress(60, `[Printify] Locating best provider for ${blueprint.title}...`);
+
     let selectedVariantId = 0;
+    let activeProviderId = 0;
+    let providerFound = false;
 
     try {
-        const catalogResponse = await axios.get(
-            `https://api.printify.com/v1/catalog/blueprints/${blueprintId}/print_providers/${printProviderId}/variants.json`,
-            { headers: { 'Authorization': `Bearer ${apiKey}` } }
+        // Fetch all available providers for this blueprint
+        const providersResp = await axios.get(
+            `https://api.printify.com/v1/catalog/blueprints/${blueprint.id}/print_providers.json`,
+             { headers: { 'Authorization': `Bearer ${apiKey}` } }
         );
+        let providers = providersResp.data;
         
-        const variants = catalogResponse.data.variants;
-        if (variants && variants.length > 0) {
-             // Pick the first available variant (usually a standard size/color)
-             selectedVariantId = variants[0].id;
-             console.log(`[Printify] Selected dynamic variant ID: ${selectedVariantId}`);
-        } else {
-             throw new Error("No variants found for this provider/blueprint combination.");
+        if (!providers || providers.length === 0) {
+             throw new Error(`No print providers found for blueprint ${blueprint.id}`);
         }
+
+        // Sort providers: Prioritize top performers but keep everyone else as fallback
+        providers.sort((a: any, b: any) => {
+            const priority = [29, 25, 3]; // SwiftPOD, Monster Digital, Printify Choice
+            const aIdx = priority.indexOf(a.id);
+            const bIdx = priority.indexOf(b.id);
+            
+            if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
+            if (aIdx !== -1) return -1;
+            if (bIdx !== -1) return 1;
+            return 0;
+        });
+
+        console.log(`[Smart Select] Found ${providers.length} providers. Iterating to find availability...`);
+
+        // Iterate through ALL providers until we find one that works
+        for (const provider of providers) {
+            try {
+                // Fetch variants for this specific provider
+                const variantsResp = await axios.get(
+                    `https://api.printify.com/v1/catalog/blueprints/${blueprint.id}/print_providers/${provider.id}/variants.json`,
+                    { headers: { 'Authorization': `Bearer ${apiKey}` } }
+                );
+                
+                const variants = variantsResp.data.variants;
+                
+                // Find first valid, enabled variant
+                const validVariant = variants.find((v: any) => v.is_enabled);
+
+                if (validVariant) {
+                    selectedVariantId = validVariant.id;
+                    activeProviderId = provider.id;
+                    providerFound = true;
+                    
+                    const logMsg = `[Smart Select] Match Found! Provider: ${provider.title} (ID: ${activeProviderId}), Variant ID: ${selectedVariantId}`;
+                    console.log(logMsg);
+                    sendProgress(65, `Provider Locked: ${provider.title}`);
+                    break; // Exit loop on first success
+                }
+            } catch (innerErr: any) {
+                // Silently continue to next provider
+            }
+        }
+
+        if (!providerFound) {
+            throw new Error(`Analyzed ${providers.length} providers but found no enabled variants for this blueprint.`);
+        }
+
     } catch (err: any) {
-        // Fallback or error if provider doesn't support this blueprint
-        console.warn("[Printify] Variant fetch failed, falling back to safe default if possible or throwing error.");
-         throw new Error(`Could not find valid variants for Blueprint ${blueprintId} on Provider ${printProviderId}: ${err.message}`);
+         throw new Error(`Smart Provider Selection Failed: ${err.message}`);
     }
 
-    // 3. Create Product
+    // 4. Create Product
     sendProgress(75, `[Printify] Creating product...`);
 
-    if (!PRINTIFY_SHOP_ID) {
-        throw new Error("PRINTIFY_SHOP_ID is not configured in server environment.");
-    }
-    console.log(`[Printify] Using Shop ID: ${PRINTIFY_SHOP_ID}`);
+    const galleryImages = mockupIds.map(id => ({ id }));
 
     const productPayload = {
-        title: productDetails.title,
-        description: productDetails.description,
-        blueprint_id: blueprintId,
-        print_provider_id: printProviderId,
+        title: productDetails.title || 'Untitled',
+        description: productDetails.description || '',
+        tags: productDetails.tags || [],
+        blueprint_id: blueprint.id,
+        print_provider_id: activeProviderId,
         variants: [
-            { id: selectedVariantId, price: 2500, is_enabled: true } 
+            { id: selectedVariantId, price: 2900, is_enabled: true } 
         ],
         print_areas: [
             {
                 variant_ids: [selectedVariantId],
                 placeholders: [
-                    { position: "front", images: [{ id: imageId, x: 0.5, y: 0.5, scale: 1, angle: 0 }] }
+                    { 
+                        position: "front", 
+                        images: [{ id: mainImageId, x: 0.5, y: 0.5, scale: 1, angle: 0 }] 
+                    }
                 ]
             }
-        ]
+        ],
+        images: galleryImages 
     };
 
     try {
         const productResponse = await axios.post(
-            `https://api.printify.com/v1/shops/${PRINTIFY_SHOP_ID}/products.json`,
+            `https://api.printify.com/v1/shops/${storeId}/products.json`,
             productPayload,
             {
                 headers: { 'Authorization': `Bearer ${apiKey}` }
             }
         );
         
-        console.log(`[Printify] Product Created. ID: ${productResponse.data.id}`);
         return {
             productId: productResponse.data.id,
-            externalId: productResponse.data.external_id || 'N/A'
+            mockupsAdded: mockupIds.length
         };
 
     } catch (err: any) {
@@ -199,192 +301,197 @@ const processPrintifyUpload = async (
     }
 };
 
-const processEtsyUpload = async (
-    zipEntries: AdmZip.IZipEntry[],
-    apiKey: string,
-    sharedSecret: string,
-    sendProgress: (p: number, m: string) => void
-) => {
-    sendProgress(85, `[Etsy] Integrating with Shop ID ${ETSY_SHOP_ID}...`);
-    
-    const mockups = zipEntries.filter(e => 
-        e.entryName.startsWith('mockup') && 
-        (e.entryName.endsWith('.png') || e.entryName.endsWith('.jpg') || e.entryName.endsWith('.jpeg'))
-    );
+// --- Middleware ---
 
-    sendProgress(90, `[Etsy] Processing ${mockups.length} mockups...`);
+app.use(cors()); // Allow all origins to prevent connection issues
+app.use(express.json() as any);
 
-    const results = [];
-    
-    // Note: To upload files or create listings on Etsy V3, full OAuth2 flow with token exchange is required.
-    // The provided Keystring/Secret is essentially an App Key, which allows public access but not write access without a user token.
-    // We will verify the Shop exists to prove connectivity.
-    
-    try {
-        // Hitting the specific Shop Endpoint using the provided ID
-        // Using 'x-api-key' for public endpoint access
-        await axios.get(
-            `https://openapi.etsy.com/v3/application/shops/${ETSY_SHOP_ID}`, 
-            { headers: { 'x-api-key': apiKey } }
-        );
-        results.push("Etsy Shop Verified");
-        
-        console.log(`[Etsy] Configuration Loaded. Shipping Profile: ${ETSY_SHIPPING_PROFILE_ID}`);
-
-    } catch (err: any) {
-        // Common error if Key is invalid or Shop is private/not found
-        console.warn("[Etsy] API connection warning (Check API Key validity):", err.message);
-    }
-
-    return {
-        uploadedCount: mockups.length,
-        status: "Ready for OAuth Token",
-        configuredShippingProfile: ETSY_SHIPPING_PROFILE_ID
-    };
-};
-
-// --- Middleware & Setup ---
-
-// Enable CORS with max permissiveness for connectivity
-app.use(cors({
-    origin: true,
-    credentials: true,
-    methods: ['GET', 'POST', 'OPTIONS']
-}));
-
-app.options('*', cors());
-app.use(express.json());
-
-// Global Request Logger
-app.use((req, res, next) => {
-    console.log(`[Traffic] ${req.method} ${req.url} received from ${req.ip}`);
-    next();
-});
-
-// Ensure uploads directory exists
 const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir);
-}
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, uploadDir);
-    },
-    filename: (req, file, cb) => {
-        cb(null, `${Date.now()}-${file.originalname}`);
-    }
-});
-
-const upload = multer({ storage });
+const upload = multer({ storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadDir),
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
+})});
 
 // --- API Endpoint ---
 
+// NEW: Endpoint to get catalog for frontend
+app.get('/api/catalog', async (req: any, res: any) => {
+    const apiKey = req.headers['authorization']?.split(' ')[1];
+    if (!apiKey) return res.status(401).json({ error: "Missing API Key" });
+    try {
+        const catalog = await fetchCatalog(apiKey);
+        res.json(catalog);
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/upload', upload.single('zipFile'), async (req: any, res: any) => {
-    console.log(`[NETWORK SUCCESS] Request received. Processing Real API Calls.`);
+    console.log(`[REQUEST] Upload received at ${new Date().toISOString()}`);
 
-    // Enable Streaming Response
     res.setHeader('Content-Type', 'application/x-ndjson');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    const zipPath = req.file?.path;
-    const { printifyKey, etsyKeystring, etsySharedSecret } = req.body;
-
     const sendProgress = (percent: number, message: string) => {
         res.write(JSON.stringify({ type: 'progress', percent, message }) + '\n');
     };
 
+    const zipPath = req.file?.path;
+    const { 
+        printifyKey, 
+        storeId, 
+        geminiTitle, 
+        geminiDescription, 
+        geminiTags, 
+        geminiSearchTerm, 
+        geminiProductType,
+        blueprintMappings
+    } = req.body;
+
+    // Use provided Store ID or default
+    const activeStoreId = storeId || DEFAULT_PRINTIFY_SHOP_ID;
+
     if (!zipPath || !printifyKey) {
-        res.status(400);
-        res.write(JSON.stringify({ success: false, message: 'Missing file or API keys.' }));
+        res.status(400).write(JSON.stringify({ success: false, message: 'Missing file or API keys.' }));
         res.end();
         return;
     }
 
     try {
-        sendProgress(10, "File received. Extracting ZIP...");
+        sendProgress(10, "Extracting ZIP contents...");
 
-        // 1. Extract ZIP
         const zip = new AdmZip(zipPath);
         const zipEntries = zip.getEntries();
         
-        // 2. Validation
-        sendProgress(20, "Validating file structure...");
-        let listingDetailsText = '';
-        let hasOriginal = false;
-        let mockupsCount = 0;
+        // 1. Image Classification
+        const imageEntries = zipEntries.filter(e => 
+            !e.isDirectory && /\.(png|jpg|jpeg)$/i.test(e.entryName)
+        );
 
-        zipEntries.forEach(entry => {
-            if (entry.entryName === 'listing_details.txt') listingDetailsText = entry.getData().toString('utf8');
-            if (entry.entryName === 'original.png') hasOriginal = true;
-            if (entry.entryName.startsWith('mockup')) mockupsCount++;
-        });
+        let mainImageEntry = imageEntries.find(e => e.entryName.toLowerCase().includes('original'));
+        if (!mainImageEntry) {
+            const nonMockups = imageEntries.filter(e => !e.entryName.toLowerCase().includes('mockup'));
+            mainImageEntry = nonMockups.length > 0 ? nonMockups[0] : imageEntries[0];
+        }
 
-        if (!hasOriginal) throw new Error("Missing 'original.png' in ZIP.");
-        if (!listingDetailsText) throw new Error("Missing 'listing_details.txt' in ZIP.");
+        if (!mainImageEntry) throw new Error("No valid image files found in ZIP.");
+        
+        const mockupEntries = imageEntries.filter(e => e.entryName !== mainImageEntry!.entryName);
 
-        // 3. Parse Details
-        sendProgress(30, "Parsing product metadata...");
-        const productDetails = parseListingDetails(listingDetailsText);
+        // 2. Metadata Resolution & Blueprint Matching
+        let productDetails: any = {};
+        let targetBlueprint: any = null;
+        let productType = 'Standard';
+
+        // Load Catalog
+        sendProgress(20, "Fetching Printify Catalog...");
+        const catalog = await fetchCatalog(printifyKey);
+
+        if (geminiTitle) {
+            // USE GEMINI DATA
+            sendProgress(30, "Applying Gemini Intelligence...");
+            productDetails = {
+                title: geminiTitle,
+                description: geminiDescription,
+                tags: geminiTags ? geminiTags.split(',') : []
+            };
+            productType = geminiProductType || 'AI Detected';
+        } else {
+            // FALLBACK TO INTERNAL PARSING
+            sendProgress(30, "Parsing text file (Legacy Mode)...");
+            const textEntry = zipEntries.find(e => e.entryName.toLowerCase().endsWith('.txt') && !e.isDirectory);
+            if (textEntry) {
+                const text = textEntry.getData().toString('utf8');
+                const parsed = parseListingDetails(text);
+                productDetails = parsed;
+                productType = parsed.productType || 'Parsed';
+            } else {
+                productDetails = { title: 'Untitled', description: 'No text file found', tags: [] };
+            }
+        }
+
+        // --- BLUEPRINT MATCHING LOGIC ---
         
-        sendProgress(40, `Target: ${productDetails.productType} -> Matching Blueprint...`);
+        // 1. Check User Overrides
+        const mappings = blueprintMappings ? JSON.parse(blueprintMappings) : [];
+        if (mappings.length > 0) {
+            const override = mappings.find((m: any) => m.keyword.toLowerCase() === productType.toLowerCase());
+            if (override) {
+                 sendProgress(32, `[Override] Force mapping '${productType}' to ID ${override.blueprintId}`);
+                 targetBlueprint = catalog.find((b: any) => b.id === override.blueprintId);
+            }
+        }
+
+        // 2. Try Gemini Robust Search Term (e.g. "3001", "18500")
+        if (!targetBlueprint && geminiSearchTerm) {
+            sendProgress(35, `[Robust AI] Matching standard model: "${geminiSearchTerm}"...`);
+            targetBlueprint = matchBlueprint(geminiSearchTerm, catalog);
+        }
         
-        // 4. Blueprint Matching
-        const blueprintId = getBlueprintId(productDetails.productType);
+        // 3. Fallback: Safety Net based on productType keyword
+        if (!targetBlueprint) {
+            const type = (productType || '').toLowerCase();
+            let safeTerm = '';
+            
+            if (type.includes('hoodie')) safeTerm = '18500';
+            else if (type.includes('sweatshirt')) safeTerm = '18000';
+            else if (type.includes('mug')) safeTerm = '11oz';
+            else if (type.includes('v-neck')) safeTerm = '3005';
+            else if (type.includes('tank')) safeTerm = '3480';
+            else safeTerm = '3001'; // Default Safety Net is always T-Shirt
+            
+            sendProgress(38, `[Safety Net] Auto-selecting reliable blueprint for '${type}': Searching '${safeTerm}'`);
+            targetBlueprint = matchBlueprint(safeTerm, catalog);
+        }
+
+        if (!targetBlueprint) {
+            console.log(`[Proof] Policy Enforced: Ignoring listing brand/details.`);
+            throw new Error("Could not identify a valid Printify Blueprint even with safety nets.");
+        }
+
+        // 3. Execution
+        console.log(`[Proof] Provider Strategy: Ignoring listing preferences. Scanning all available providers...`);
+        sendProgress(40, `Targeting: ${targetBlueprint.title} (${targetBlueprint.brand})`);
         
-        // 5. REAL Printify Upload
         const printifyResult = await processPrintifyUpload(
-            blueprintId, 
+            targetBlueprint, 
             productDetails, 
             printifyKey, 
-            zipEntries, 
+            activeStoreId,
+            mainImageEntry,
+            mockupEntries,
             sendProgress
         );
 
-        // 6. REAL Etsy Processing
-        const etsyResult = await processEtsyUpload(
-            zipEntries, 
-            etsyKeystring, 
-            etsySharedSecret, 
-            sendProgress
-        );
+        sendProgress(100, "Success!");
 
-        sendProgress(100, "All external API operations complete.");
-
-        // 7. Success Response
         res.write(JSON.stringify({
             success: true,
-            message: 'Live Automation Executed Successfully.',
+            message: 'Product Created Successfully.',
             data: {
-                blueprintId,
-                productType: productDetails.productType,
+                blueprintId: targetBlueprint.id,
+                blueprintTitle: targetBlueprint.title,
+                blueprintBrand: targetBlueprint.brand,
+                productType,
                 listingTitle: productDetails.title,
-                mockupsUploaded: mockupsCount,
-                printifyDetails: printifyResult,
-                etsyDetails: etsyResult
+                mockupsUploaded: printifyResult.mockupsAdded
             }
         }) + '\n');
         
     } catch (error: any) {
-        console.error("[Execution Error]", error.message);
+        console.error("[Error]", error.message);
         res.write(JSON.stringify({
             success: false,
-            message: error.message || "Internal Execution Error"
+            message: error.message || "Unknown Server Error"
         }) + '\n');
     } finally {
         if (zipPath && fs.existsSync(zipPath)) {
-            try {
-                fs.unlinkSync(zipPath);
-            } catch (err) {
-                console.error("Cleanup warning:", err);
-            }
+            try { fs.unlinkSync(zipPath); } catch (e) {}
         }
         res.end();
     }
 });
 
-// Bind to 0.0.0.0 for external access support
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
 });

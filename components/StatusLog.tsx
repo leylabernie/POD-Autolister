@@ -1,5 +1,5 @@
 import React from 'react';
-import { LogEntry, ServerResponse, PRINTIFY_BLUEPRINTS } from '../types';
+import { LogEntry, ServerResponse } from '../types';
 import { CheckCircle2, AlertCircle, Terminal, Loader2, Tag } from 'lucide-react';
 
 interface StatusLogProps {
@@ -16,10 +16,6 @@ const StatusLog: React.FC<StatusLogProps> = ({ logs, result, progress }) => {
   const showLogs = logs.length > 0 || result || progress.isActive;
 
   if (!showLogs) return null;
-
-  const matchedBlueprint = result?.success && result.data 
-    ? PRINTIFY_BLUEPRINTS.find(bp => bp.id === result.data!.blueprintId)
-    : null;
 
   return (
     <div className="space-y-6">
@@ -112,7 +108,7 @@ const StatusLog: React.FC<StatusLogProps> = ({ logs, result, progress }) => {
                    </div>
 
                    {/* Blueprint Details Section */}
-                   {matchedBlueprint && (
+                   {result.data.blueprintId && (
                      <div className="bg-indigo-100/50 border border-indigo-200 rounded-lg p-4">
                         <div className="flex items-center gap-2 mb-3">
                            <Tag className="w-4 h-4 text-indigo-600" />
@@ -121,15 +117,15 @@ const StatusLog: React.FC<StatusLogProps> = ({ logs, result, progress }) => {
                         <div className="grid grid-cols-3 gap-4 text-sm">
                            <div>
                               <span className="block text-[10px] uppercase font-bold text-indigo-400">Category</span>
-                              <span className="font-medium text-indigo-800">{matchedBlueprint.category}</span>
+                              <span className="font-medium text-indigo-800">{result.data.blueprintTitle}</span>
                            </div>
                            <div>
-                              <span className="block text-[10px] uppercase font-bold text-indigo-400">Brand Model</span>
-                              <span className="font-medium text-indigo-800">{matchedBlueprint.brand}</span>
+                              <span className="block text-[10px] uppercase font-bold text-indigo-400">Brand</span>
+                              <span className="font-medium text-indigo-800">{result.data.blueprintBrand}</span>
                            </div>
                            <div>
                               <span className="block text-[10px] uppercase font-bold text-indigo-400">Blueprint ID</span>
-                              <span className="font-mono font-medium text-indigo-800">#{matchedBlueprint.id}</span>
+                              <span className="font-mono font-medium text-indigo-800">#{result.data.blueprintId}</span>
                            </div>
                         </div>
                      </div>
